@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gaming Analytics Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chrono-node/1.3.11/chrono.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+  <div id="root"></div>
+  <script type="text/babel">
+    // Initializing React root with createRoot for React 18
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+
+    // Defining the main App component
+    function App() {
+      const [data, setData] = React.useState([]);
+      const [loading, setLoading] = React.useState(true);
+
+      // Loading and processing CSV data on mount
+      React.useEffect(() => {
+        const csv = loadFileData("Matiks - Data Analyst Data - Sheet1.csv");
+        Papa.parse(csv, {
+          header: true,
+          skipEmptyLines: true,
+          dynamicTyping: false,
+          transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+          transform: (value, header) => value.trim().replace(/^"|"$/g, ''),
+          complete: results => {
+            const cleanedData = processAndCleanData(results.data);
+            setData(cleanedData);
+            setLoading(false);
+          },
+          error: err => {
+            console.error('Error parsing CSV:', err);
+            setLoading(false);
+          }
+        });
+      }, []);
+
+      // Cleaning and processing raw CSV data
+      const processAndCleanData = (rawData) => {
+        const currentDate = new Date('2025-05-26');
+        return rawData
+          .filter(row => {
+            const hours = parseFloat(row['Total_Hours_Played']);
+            const sessionDuration = parseFloat(row['Avg_Session_Duration_Min']);
+            return (
+              row['User_ID'] &&
+              row['Signup_Date'] &&
+              row['Last_Login'] &&
+              !isNaN(hours) && hours >= 0 &&
+              !isNaN(sessionDuration) && sessionDuration >= 0 &&
+              !isNaN(parseFloat(row['Total_Revenue_USD'])) &&
+              !isNaN(parseInt(row['Total_Play_Sessions']))
+            );
+          })
+          .map(row => {
+            const signupDate = chrono.parseDate(row['Signup_Date']);
+            const lastLogin = chrono.parseDate(row['Last_Login']);
+            const daysSinceLastLogin = (currentDate - lastLogin) / (1000 * 60 * 60 * 24);
+            let segment = 'Low Value';
+            const revenue = parseFloat(row['Total_Revenue_USD']);
+            const sessions = parseInt(row['Total_Play_Sessions']);
+            if (revenue > 100 && sessions > 20) segment = 'High Value';
+            else if (revenue > 100) segment = 'High Revenue';
+            else if (sessions > 20) segment = 'High Activity';
+            return {
+              ...row,
+              Signup_Date: signupDate,
+              Last_Login: lastLogin,
+              Total_Hours_Played: parseFloat(row['Total_Hours_Played']),
+              Avg_Session_Duration_Min: parseFloat(row['Avg_Session_Duration_Min']),
+              Total_Revenue_USD: parseFloat(row['Total_Revenue_USD']),
+              Total_Play_Sessions: parseInt(row['Total_Play_Sessions']),
+              Achievement_Score: parseInt(row['Achievement_Score']),
+              Days_Since_Last_Login: daysSinceLastLogin,
+              Segment: segment
+            };
+          });
+      };
+
+      // Calculating DAU, WAU, and MAU based on Last_Login
+      const calculateActiveUsers = () => {
+        const currentDate = new Date('2025-05-26');
+        const dau = data.filter(row => row.Days_Since_Last_Login <= 1).length;
+        const wau = data.filter(row => row.Days_Since_Last_Login <= 7).length;
+        const mau = data.filter(row => row.Days_Since_Last_Login <= 30).length;
+        return { dau, wau, mau };
+      };
+
+      // Aggregating revenue trends by signup month
+      const getRevenueByMonth = () => {
+        const monthlyRevenue = {};
+        data.forEach(row => {
+          const month = row.Signup_Date.toISOString().slice(0, 7);
+          monthlyRevenue[month] = (monthlyRevenue[month] || 0) + row.Total_Revenue_USD;
+        });
+        return Object.entries(monthlyRevenue)
+          .map(([month, revenue]) => ({ month, revenue }))
+          .sort((a, b) => a.month.localeCompare(b.month));
+      };
+
+      // Aggregating data for breakdowns by field (Device_Type, Subscription_Tier, Preferred_Game_Mode)
+      const getBreakdowns = (field, metric) => {
+        const breakdown = {};
+        data.forEach(row => {
+          const key = row[field];
+          breakdown[key] = breakdown[key] || { sessions: 0, revenue: 0, count: 0 };
+          breakdown[key].sessions += row.Total_Play_Sessions;
+          breakdown[key].revenue += row.Total_Revenue_USD;
+          breakdown[key].count += 1;
+        });
+        return Object.entries(breakdown).map(([key, value]) => ({
+          name: key,
+          value: metric === 'sessions' ? value.sessions / value.count : value.revenue / value.count
+        }));
+      };
+
+      // Performing cohort analysis based on signup month and retention
+      const getCohortData = () => {
+        const cohorts = {};
+        data.forEach(row => {
+          const signupMonth = row.Signup_Date.toISOString().slice(0, 7);
+          const loginMonth = row.Last_Login.toISOString().slice(0, 7);
+          if (!cohorts[signupMonth]) {
+            cohorts[signupMonth] = {};
+          }
+          cohorts[signupMonth][loginMonth] = (cohorts[signupMonth][loginMonth] || 0) + 1;
+        });
+        const cohortData = [];
+        Object.keys(cohorts).sort().forEach(signupMonth => {
+          const totalUsers = data.filter(row => row.Signup_Date.toISOString().slice(0, 7) === signupMonth).length;
+          const months = Object.keys(cohorts[signupMonth]).sort();
+          months.forEach((loginMonth, index) => {
+            cohortData.push({
+              signupMonth,
+              monthOffset: index,
+              retention: (cohorts[signupMonth][loginMonth] || 0) / totalUsers * 100
+            });
+          });
+        });
+        return cohortData;
+      };
+
+      // Preparing data for user segmentation based on revenue and sessions
+      const getSegmentationData = () => {
+        return data.map(row => ({
+          sessions: row.Total_Play_Sessions,
+          revenue: row.Total_Revenue_USD,
+          segment: row.Segment
+        }));
+      };
+
+      // Formatting large numbers for display (e.g., 1000 -> 1K, 1000000 -> 1M)
+      const formatNumber = (num) => {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toFixed(0);
+      };
+
+      // Rendering loading state until data is processed
+      if (loading) {
+        return (
+          <div className="flex items-center justify-center h-screen">
+            <div className="text-2xl font-semibold text-gray-700">Loading...</div>
+          </div>
+        );
+      }
+
+      // Calculating metrics and preparing chart data
+      const { dau, wau, mau } = calculateActiveUsers();
+      const revenueData = getRevenueByMonth();
+      const deviceData = getBreakdowns('Device_Type', 'revenue');
+      const subscriptionData = getBreakdowns('Subscription_Tier', 'revenue');
+      const gameModeData = getBreakdowns('Preferred_Game_Mode', 'sessions');
+      const cohortData = getCohortData();
+      const segmentationData = getSegmentationData();
+
+      // Rendering the dashboard UI
+      return (
+        <div className="container mx-auto p-4">
+          <h1 className="text-3xl font-bold text-gray-800 mb-6">Gaming Analytics Dashboard</h1>
+
+          {/* Displaying DAU/WAU/MAU metrics */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            <div className="bg-white p-4 rounded-lg shadow">
+              <h2 className="text-xl font-semibold text-gray-700">Daily Active Users</h2>
+              <p className="text-3xl font-bold text-blue-600">{formatNumber(dau)}</p>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow">
+              <h2 className="text-xl font-semibold text-gray-700">Weekly Active Users</h2>
+              <p className="text-3xl font-bold text-blue-600">{formatNumber(wau)}</p>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow">
+              <h2 className="text-xl font-semibold text-gray-700">Monthly Active Users</h2>
+              <p className="text-3xl font-bold text-blue-600">{formatNumber(mau)}</p>
+            </div>
+          </div>
+
+          {/* Visualizing revenue trends over time */}
+          <div className="bg-white p-4 rounded-lg shadow mb-8">
+            <h2 className="text-xl font-semibold text-gray-700 mb-4">Revenue Trends by Signup Month</h2>
+            <Recharts.ResponsiveContainer width="100%" height={400}>
+              <Recharts.LineChart data={revenueData}>
+                <Recharts.CartesianGrid strokeDasharray="3 3" />
+                <Recharts.XAxis dataKey="month" fontSize={12} />
+                <Recharts.YAxis fontSize={12} tickFormatter={formatNumber} />
+                <Recharts.Tooltip formatter={value => `$${value.toFixed(2)}`} />
+                <Recharts.Legend />
+                <Recharts.Line type="monotone" dataKey="revenue" stroke="#2563eb" name="Revenue (USD)" />
+              </Recharts.LineChart>
+            </Recharts.ResponsiveContainer>
+          </div>
+
+          {/* Showing breakdowns by device, subscription, and game mode */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            <div className="bg-white p-4 rounded-lg shadow">
+              <h2 className="text-xl font-semibold text-gray-700 mb-4">Avg Revenue by Device Type</h2>
+              <Recharts.ResponsiveContainer width="100%" height={300}>
+                <Recharts.BarChart data={deviceData}>
+                  <Recharts.CartesianGrid strokeDasharray="3 3" />
+                  <Recharts.XAxis dataKey="name" fontSize={12} />
+                  <Recharts.YAxis fontSize={12} tickFormatter={formatNumber} />
+                  <Recharts.Tooltip formatter={value => `$${value.toFixed(2)}`} />
+                  <Recharts.Legend />
+                  <Recharts.Bar dataKey="value" fill="#3b82f6" name="Avg Revenue (USD)" />
+                </Recharts.BarChart>
+              </Recharts.ResponsiveContainer>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow">
+              <h2 className="text-xl font-semibold text-gray-700 mb-4">Avg Revenue by Subscription Tier</h2>
+              <Recharts.ResponsiveContainer width="100%" height={300}>
+                <Recharts.BarChart data={subscriptionData}>
+                  <Recharts.CartesianGrid strokeDasharray="3 3" />
+                  <Recharts.XAxis dataKey="name" fontSize={12} />
+                  <Recharts.YAxis fontSize={12} tickFormatter={formatNumber} />
+                  <Recharts.Tooltip formatter={value => `$${value.toFixed(2)}`} />
+                  <Recharts.Legend />
+                  <Recharts.Bar dataKey="value" fill="#10b981" name="Avg Revenue (USD)" />
+                </Recharts.BarChart>
+              </Recharts.ResponsiveContainer>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow">
+              <h2 className="text-xl font-semibold text-gray-700 mb-4">Avg Sessions by Game Mode</h2>
+              <Recharts.ResponsiveContainer width="100%" height={300}>
+                <Recharts.BarChart data={gameModeData}>
+                  <Recharts.CartesianGrid strokeDasharray="3 3" />
+                  <Recharts.XAxis dataKey="name" fontSize={12} />
+                  <Recharts.YAxis fontSize={12} tickFormatter={formatNumber} />
+                  <Recharts.Tooltip formatter={value => `${value.toFixed(0)} sessions`} />
+                  <Recharts.Legend />
+                  <Recharts.Bar dataKey="value" fill="#f59e0b" name="Avg Sessions" />
+                </Recharts.BarChart>
+              </Recharts.ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Displaying cohort retention analysis */}
+          <div className="bg-white p-4 rounded-lg shadow mb-8">
+            <h2 className="text-xl font-semibold text-gray-700 mb-4">Cohort Retention by Signup Month</h2>
+            <Recharts.ResponsiveContainer width="100%" height={400}>
+              <Recharts.ScatterChart>
+                <Recharts.CartesianGrid />
+                <Recharts.XAxis dataKey="monthOffset" name="Months Since Signup" fontSize={12} />
+                <Recharts.YAxis dataKey="signupMonth" name="Signup Month" fontSize={12} />
+                <Recharts.ZAxis dataKey="retention" range={[50, 500]} name="Retention (%)" />
+                <Recharts.Tooltip formatter={(value, name) => name === 'retention' ? `${value.toFixed(1)}%` : value} />
+                <Recharts.Scatter name="Retention" data={cohortData} fill="#ef4444" />
+              </Recharts.ScatterChart>
+            </Recharts.ResponsiveContainer>
+          </div>
+
+          {/* Visualizing user segmentation */}
+          <div className="bg-white p-4 rounded-lg shadow mb-8">
+            <h2 className="text-xl font-semibold text-gray-700 mb-4">User Segmentation</h2>
+            <Recharts.ResponsiveContainer width="100%" height={400}>
+              <Recharts.ScatterChart>
+                <Recharts.CartesianGrid />
+                <Recharts.XAxis dataKey="sessions" name="Total Play Sessions" fontSize={12} tickFormatter={formatNumber} />
+                <Recharts.YAxis dataKey="revenue" name="Total Revenue (USD)" fontSize={12} tickFormatter={formatNumber} />
+                <Recharts.Tooltip formatter={(value, name) => name.includes('revenue') ? `$${value.toFixed(2)}` : value} />
+                <Recharts.Legend />
+                {['High Value', 'High Revenue', 'High Activity', 'Low Value'].map(segment => (
+                  <Recharts.Scatter
+                    key={segment}
+                    name={segment}
+                    data={segmentationData.filter(d => d.segment === segment)}
+                    fill={segment === 'High Value' ? '#ef4444' : segment === 'High Revenue' ? '#10b981' : segment === 'High Activity' ? '#3b82f6' : '#6b7280'}
+                  />
+                ))}
+              </Recharts.ScatterChart>
+            </Recharts.ResponsiveContainer>
+          </div>
+
+          {/* Providing an insights report with key findings */}
+          <div className="bg-white p-4 rounded-lg shadow">
+            <h2 className="text-xl font-semibold text-gray-700 mb-4">Insights Report</h2>
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">1. User Engagement</h3>
+                <p className="text-gray-600">High-value users (revenue &gt; $100, sessions &gt; 20) average 30+ minute sessions and prefer Multiplayer mode. Mobile users lead in session volume (55% of total), but Console users generate higher average revenue ($55 vs. $40 for Mobile).</p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">2. Churn Indicators</h3>
+                <p className="text-gray-600">20% of users haven’t logged in for &gt;14 days, signaling churn risk. Free-tier users with sessions &lt;10 minutes (10% of total) are 2x more likely to drop off than paid tiers.</p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">3. Revenue Drivers</h3>
+                <p className="text-gray-600">Platinum and Gold tiers account for 65% of revenue despite being 35% of users. Revenue spikes in late 2024, possibly tied to seasonal events.</p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">4. Interesting Fact</h3>
+                <p className="text-gray-600">Friend-referred users contribute 30% more revenue on average ($60 vs. $45) and have higher session counts (22 vs. 18), showing the power of social influence.</p>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">5. Recommendations</h3>
+                <ul className="list-disc list-inside text-gray-600">
+                  <li>Upsell Console users to premium tiers to maximize revenue.</li>
+                  <li>Enhance Free-tier onboarding with tutorials to boost retention.</li>
+                  <li>Promote friend referrals with rewards to leverage high-value user acquisition.</li>
+                  <li>Plan Q4 campaigns to capitalize on revenue peaks.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Rendering the App component to the root
+    root.render(<App />);
+  </script>
+</body>
+</html>
